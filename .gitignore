@@ -1,0 +1,33 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+/.kotlin
+*/build
+*/.cxx
+
+# Stale local duplicate of the project (not part of the repo).
+/zero-rewards/
+
+# Android debug / release outputs
+*.apk
+*.aab
+*.ap_
+*.dex
+release/
+
+# Keystores — never commit signing material
+*.keystore
+*.jks
+google-services.json
+
+# OS / editor junk
+Thumbs.db
+*.swp
+*.swo

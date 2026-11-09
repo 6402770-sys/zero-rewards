@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="zero_window">#F7F6F2</color>
+    <color name="zero_accent">#8A6414</color>
+
+    <color name="zero_dialog_dark_surface">#1B1E23</color>
+    <color name="zero_dialog_dark_border">#353942</color>
+    <color name="zero_dialog_dark_text">#F1F2F4</color>
+    <color name="zero_dialog_dark_text_muted">#9BA1AB</color>
+
+    <color name="zero_dialog_light_surface">#FFFFFF</color>
+    <color name="zero_dialog_light_border">#E6E3DC</color>
+    <color name="zero_dialog_light_text">#15171A</color>
+    <color name="zero_dialog_light_text_muted">#5F636B</color>
+</resources>

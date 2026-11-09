@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.ZeroRewards" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/zero_window</item>
+        <item name="android:colorAccent">@color/zero_accent</item>
+    </style>
+
+    <!-- The app's theme can differ from the system's, so MainActivity picks one of these itself. -->
+    <style name="Theme.ZeroRewards.Dialog.Dark" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/zero_dialog_background_dark</item>
+        <item name="android:textColorPrimary">@color/zero_dialog_dark_text</item>
+        <item name="android:textColorSecondary">@color/zero_dialog_dark_text_muted</item>
+        <item name="android:buttonBarButtonStyle">@style/Widget.ZeroRewards.DialogButton</item>
+    </style>
+
+    <style name="Theme.ZeroRewards.Dialog.Light" parent="android:Theme.Material.Light.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/zero_dialog_background_light</item>
+        <item name="android:textColorPrimary">@color/zero_dialog_light_text</item>
+        <item name="android:textColorSecondary">@color/zero_dialog_light_text_muted</item>
+        <item name="android:buttonBarButtonStyle">@style/Widget.ZeroRewards.DialogButton</item>
+    </style>
+
+    <style name="Widget.ZeroRewards.DialogButton" parent="android:Widget.Material.Button.Borderless.Colored">
+        <item name="android:textAllCaps">false</item>
+    </style>
+</resources>

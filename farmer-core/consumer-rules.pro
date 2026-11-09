@@ -1,0 +1,3 @@
+-keep class androidx.webkit.** { *; }
+-keep class kotlinx.serialization.** { *; }
+-keepclassmembers class * extends androidx.room.RoomDatabase { *; }

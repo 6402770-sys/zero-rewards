@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Zero Rewards</string>
+    <string name="notif_channel_name">Farmer runs</string>
+    <string name="notif_channel_desc">Progress for scheduled account runs</string>
+    <string name="notif_title_running">Running account farm</string>
+    <string name="accessibility_service_description">Zero Rewards needs Accessibility to drive the Bing app on your behalf — opening Rewards tiles, tapping through quizzes, scrolling the news feed. It only interacts with the Bing app (com.microsoft.bing).</string>
+</resources>
