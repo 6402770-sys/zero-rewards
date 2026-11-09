@@ -107,7 +107,7 @@ fun selectionFraction(selected: Boolean, label: String = "selection"): Float =
         if (selected) 1f else 0f,
         spring(dampingRatio = 1f, stiffness = Spring.StiffnessMediumLow),
         label = label,
-    ).value
+    ).value.coerceIn(0f, 1f) // used as an alpha, which must stay in 0..1
 
 private const val ENTRANCE_MS = 520
 private const val STAGGER_STEP_MS = 55

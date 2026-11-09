@@ -26,6 +26,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
+import kotlin.coroutines.cancellation.CancellationException
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
@@ -292,7 +293,21 @@ fun ZeroTheme(content: @Composable () -> Unit) {
             appliedDark = targetDark
             return@LaunchedEffect
         }
-        overlay = layer.toImageBitmap()
+        // If the frame can't be captured on this device, apply the theme without the reveal.
+        val snapshot = try {
+            layer.toImageBitmap()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
+        if (snapshot == null) {
+            overlay = null
+            appliedSeed = targetSeed
+            appliedDark = targetDark
+            return@LaunchedEffect
+        }
+        overlay = snapshot
         overlayChange = change
         origin = ThemeReveal.origin
         ThemeReveal.origin = null

@@ -288,7 +288,9 @@ private fun AccentSwatch(
                 .pressScale(source, 0.9f)
                 .size(46.dp)
                 .border(2.dp, ring, CircleShape)
-                .padding(inset)
+                // The bouncy spring dips below zero when a swatch is deselected, and
+                // negative padding throws, so the overshoot is clamped away.
+                .padding(inset.coerceAtLeast(0.dp))
                 .background(color, CircleShape),
         ) {
             Icon(
