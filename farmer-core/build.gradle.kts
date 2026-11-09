@@ -24,7 +24,6 @@ android {
 
 dependencies {
     implementation(libs.androidx.core.ktx)
-    implementation(libs.androidx.webkit)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
@@ -34,7 +33,6 @@ dependencies {
     ksp(libs.room.compiler)
 
     implementation(libs.work.runtime.ktx)
-    implementation(libs.datastore.preferences)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.ext.junit)
