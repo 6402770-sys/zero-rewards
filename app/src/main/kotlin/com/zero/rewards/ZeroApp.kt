@@ -16,7 +16,7 @@ class ZeroApp : Application() {
         super.onCreate()
         container = AppContainer(this, FarmerDatabase.get(this))
         createNotificationChannel()
-        if (isMainProcess()) FarmScheduler.scheduleDaily(this)
+        if (isMainProcess()) FarmScheduler.cancelLegacyDailyRun(this)
     }
 
     private fun isMainProcess(): Boolean =

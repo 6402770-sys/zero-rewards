@@ -20,7 +20,7 @@ import kotlinx.coroutines.launch
 
 /**
  * Hosts one or more sequential account farm runs. Started from the
- * dashboard play button, the daily scheduler, or the streak-prompt
+ * dashboard play button or the streak-prompt
  * batch picker. Can be stopped from the dashboard via [ACTION_STOP]
  * which cancels the in-flight run AND clears any queued accounts.
  */

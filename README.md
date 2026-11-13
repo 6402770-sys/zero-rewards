@@ -191,7 +191,7 @@ farmer-core/    the automation itself, plus the local database
   automation/   gesture helpers and BingPackage, the on-screen text it looks for
   search/       search terms (Wikipedia + word lists)
   market/       per-market language settings
-  scheduler/    the nightly run
+  scheduler/    cleanup for the old nightly job (removed in v0.1.3)
 ```
 
 ### When Bing changes its UI
