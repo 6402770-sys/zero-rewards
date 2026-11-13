@@ -5,7 +5,7 @@
 ### Hands-free Microsoft Rewards for Android
 
 Zero Rewards taps through your daily Rewards activities in the official Bing app,
-for every account you have, while the phone sits on the charger.
+for every account you have, whenever you start a run.
 
 [![Latest release](https://img.shields.io/github/v/release/6402770-sys/zero-rewards?label=release)](https://github.com/6402770-sys/zero-rewards/releases/latest)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
@@ -48,8 +48,8 @@ Because of that:
   Starting another run while one is in progress adds it to the queue.
 - **Streak reminders:** daily notifications at any times you choose. Tap one,
   answer *Sí*, pick the accounts, and the run starts.
-- **Nightly run:** once a day, early in the morning (around 2–4 AM), the app runs
-  every account by itself if the phone is online and the battery isn't low.
+- **Runs only when you ask:** nothing farms in the background on a schedule. A run
+  starts from the dashboard or from a streak reminder you confirm.
 - **Reminders survive reboots** and changes to the clock or time zone.
 - **Appearance:** light, dark or system theme; 8 accent colors or any custom
   color; 16 launcher icons.
@@ -70,6 +70,11 @@ Because of that:
 2. Open it on the phone and allow installing from that source if Android asks.
 
 New versions install over the old one and keep your accounts and settings.
+
+> [!IMPORTANT]
+> Versions up to v0.1.2 had a nightly run that farmed every account by itself
+> around 2–4 AM. v0.1.3 removes it. After updating, **open the app once** so the
+> job left over from the old version gets cancelled.
 
 <details>
 <summary>Check that the APK is genuine</summary>
@@ -118,10 +123,6 @@ The line `Signer #1 certificate SHA-256 digest` must read:
 **Default account settings:** 20 searches, 8–16 seconds between searches, and
 every activity turned on.
 
-> [!NOTE]
-> The nightly run has no off switch in the app yet. If you only want to farm by
-> hand, keep in mind that the early-morning run still happens.
-
 ## Privacy
 
 - Your accounts and settings stay on the phone, and Android backups exclude them.
@@ -141,7 +142,7 @@ cleanup. Turn it back on (step 2 of [Setup](#setup)).
 The email in Zero Rewards must match the one in Bing's account list. Check for
 typos or a different alias.
 
-**Reminders or the nightly run don't fire.**
+**Reminders don't fire.**
 Set *Settings → Apps → Zero Rewards → Battery* to *Unrestricted*. Some phones
 stop background apps aggressively.
 
