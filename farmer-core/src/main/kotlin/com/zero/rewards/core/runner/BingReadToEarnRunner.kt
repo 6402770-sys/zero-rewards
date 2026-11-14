@@ -2,6 +2,7 @@ package com.zero.rewards.core.runner
 
 import com.zero.rewards.core.account.Account
 import com.zero.rewards.core.automation.AutomationNode
+import com.zero.rewards.core.automation.BingPackage
 import com.zero.rewards.core.automation.BingPrimitives
 import com.zero.rewards.core.log.FarmerLog
 
@@ -154,36 +155,110 @@ class BingReadToEarnRunner(
     }
 
     /**
-     * Find the "Leer para ganar" tile inside Actividades diarias. Same
-     * shape as daily-set / MA tiles: clickable View, non-empty desc
-     * containing the phrase, wider than 50 % of screen, height 100..400.
-     * Scrolls the hub down until it appears.
+     * Find the "Leer para ganar" tile inside Actividades diarias.
+     *
+     * Previous version scrolled down up to 14 times blindly; if the tile
+     * flashed past (a11y lag) or the hub opened pre-scrolled, we'd overshoot
+     * and never come back. New strategy:
+     *   1. Direct match on the current viewport — maybe we're already there.
+     *   2. Anchor on the "Actividades diarias" / "Daily activities" section
+     *      header via scrollUntil. The tile lives in a ~2-screen band below.
+     *   3. Bounded scan with scroll-UP recovery when the header leaves the
+     *      viewport (= we overshot). Stale-signature exit keeps it from
+     *      scrolling into empty hub tail when the tile really isn't there.
+     *
+     * Match criteria relaxed: height 80..520 (was 100..400) and if a desc
+     * match is found without any shape constraint, trust it — the phrase
+     * "Leer para ganar" is unique enough in the hub that the drawable can
+     * only be the tile.
      */
     private suspend fun findLeerParaGanarTile(): AutomationNode? {
-        val screenW = primitives.host.screenWidth
+        // 1. Already in view?
+        directMatchReadToEarn()?.let { return it }
 
-        for (attempt in 0 until 14) {
-            val classes = listOf(
-                "android.view.View", "android.view.ViewGroup",
-                "android.widget.FrameLayout", "android.widget.LinearLayout",
-            )
-            val all = buildList { for (c in classes) addAll(primitives.host.findByClass(c)) }
-                .distinctBy { it.handle }
+        // 2. Anchor on section header. Caller already reset the hub to top.
+        val header = primitives.scrollUntil(maxScrolls = 8, fraction = 0.5f) {
+            primitives.host.findByText("Actividades diarias", 400L)
+                ?: primitives.host.findByText("Daily activities", 300L)
+        }
+        if (header == null) {
+            FarmerLog.d("read-to-earn: 'Actividades diarias' header not found, last-ditch viewport scan")
+            return directMatchReadToEarn()
+        }
+        FarmerLog.d("read-to-earn: anchored on 'Actividades diarias' @y=${header.boundsT}")
 
-            val hit = all
-                .filter { n ->
-                    n.visible && n.clickable &&
-                        n.width > screenW * 0.5 && n.height in 100..400 &&
-                        (n.contentDescription?.toString()?.contains("Leer para ganar", ignoreCase = true) == true ||
-                            n.contentDescription?.toString()?.contains("Read to earn", ignoreCase = true) == true)
+        // 3. Bounded band below header; scroll-up recovery on overshoot.
+        var stale = 0
+        var lastSig = primitives.pageSignature()
+        for (attempt in 0 until 10) {
+            directMatchReadToEarn()?.let { return it }
+            if (!panel.isHubVisible(300L)) {
+                FarmerLog.d("read-to-earn: hub no longer visible, abort tile search")
+                break
+            }
+
+            val stillHaveHeader = primitives.host.findByText("Actividades diarias", 300L)
+                ?: primitives.host.findByText("Daily activities", 200L)
+            if (stillHaveHeader == null) {
+                FarmerLog.d("read-to-earn: lost section header (overshot), scroll up")
+                primitives.scrollUp(0.5f); primitives.idle(400, 700)
+                stale = 0
+                lastSig = primitives.pageSignature()
+                continue
+            }
+
+            primitives.scrollDown(0.45f); primitives.idle(400, 700)
+            val sig = primitives.pageSignature()
+            if (sig == lastSig) {
+                stale++
+                if (stale >= 3) {
+                    FarmerLog.d("read-to-earn: $stale stale scrolls under header, give up")
+                    break
                 }
-                .maxByOrNull { it.width * it.height }
-            if (hit != null) return hit
-
-            primitives.scrollDown(0.6f); primitives.idle(400, 700)
-            if (attempt > 8 && !panel.isHubVisible(300L)) break
+            } else {
+                stale = 0
+                lastSig = sig
+            }
         }
         return null
+    }
+
+    /**
+     * Try to match the Read-to-Earn tile in the current viewport. Primary
+     * picks the largest clickable View that both matches the desc hint and
+     * has a tile-like shape. Fallback picks ANY clickable with a desc hit —
+     * if Bing re-skins the tile's bounds, the desc text is still the
+     * definitive signal.
+     */
+    private suspend fun directMatchReadToEarn(): AutomationNode? {
+        val screenW = primitives.host.screenWidth
+        val classes = listOf(
+            "android.view.View", "android.view.ViewGroup",
+            "android.widget.FrameLayout", "android.widget.LinearLayout",
+            "android.widget.RelativeLayout",
+        )
+        val all = buildList { for (c in classes) addAll(primitives.host.findByClass(c)) }
+            .distinctBy { it.handle }
+        val hints = BingPackage.READ_TO_EARN_HINTS
+
+        fun matchesDesc(n: AutomationNode): Boolean {
+            val d = n.contentDescription?.toString() ?: return false
+            return hints.any { d.contains(it, ignoreCase = true) }
+        }
+
+        // Primary: shape-correct tile.
+        val tile = all
+            .filter { n ->
+                n.visible && n.clickable &&
+                    n.width > screenW * 0.5 &&
+                    n.height in 80..520 &&
+                    matchesDesc(n)
+            }
+            .maxByOrNull { it.width * it.height }
+        if (tile != null) return tile
+
+        // Fallback: desc match wins regardless of shape.
+        return all.firstOrNull { it.visible && it.clickable && matchesDesc(it) }
     }
 
     private data class FeedCard(
