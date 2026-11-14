@@ -2,7 +2,6 @@ package com.zero.rewards.core.runner
 
 import com.zero.rewards.core.account.Account
 import com.zero.rewards.core.automation.AutomationNode
-import com.zero.rewards.core.automation.BingPackage
 import com.zero.rewards.core.automation.BingPrimitives
 import com.zero.rewards.core.log.FarmerLog
 
@@ -10,10 +9,11 @@ import com.zero.rewards.core.log.FarmerLog
  * Leer para ganar / Read to earn runner.
  *
  * Entry flow (per operator spec):
- *   1. Open Rewards panel, scroll down to the "Leer para ganar" tile
- *      inside the "Actividades diarias" section.
- *   2. Tap the tile → Bing opens its news feed (same surface as the
- *      Para Ti / Noticias feed on Bing home, but reached via Rewards).
+ *   1. Go to Bing Inicio (the home tab).
+ *   2. Scroll down a few viewport fractions — the Para Ti / Noticias feed
+ *      lives directly below the fold on Inicio. Same card surface the
+ *      Rewards "Leer para ganar" tile would land us on, reached in one
+ *      step instead of hunting a tile that drifts across hub revisions.
  *   3. In the feed, pick cards that are neither ads nor videos. Tap each.
  *   4. Dwell 3-3.5 s inside the article — enough for the read credit.
  *   5. Back → scroll past the just-read article → next.
@@ -52,31 +52,32 @@ class BingReadToEarnRunner(
     private val targetArticles: Int = 10,
 ) {
 
-    private val panel = BingRewardsPanel(primitives)
-
     suspend fun run(account: Account): TaskResult {
-        if (!panel.openPanel()) return TaskResult.Failed("rewards panel didn't open")
+        // Reach Inicio. backToBingHome handles the "already there / tap
+        // Inicio tab / relaunch" cascade internally.
+        if (!primitives.backToBingHome()) {
+            FarmerLog.w("[${account.label}] read-to-earn: Inicio didn't come up")
+            return TaskResult.Skipped("Bing Inicio not reachable")
+        }
         primitives.idle(600, 1_000)
 
-        // Find and tap "Leer para ganar" tile.
-        FarmerLog.d("[${account.label}] read-to-earn: reset + find 'Leer para ganar' tile")
-        repeat(6) { primitives.scrollUp(0.75f); primitives.idle(160, 280) }
-        primitives.idle(500, 900)
+        // Scroll down into the feed. Three viewport chunks is enough on
+        // every Bing build we've seen — the "Para Ti" strip starts ~1.5
+        // viewports below the Copilot search bar.
+        FarmerLog.d("[${account.label}] read-to-earn: on Inicio, scrolling into feed")
+        repeat(3) { primitives.scrollDown(0.7f); primitives.idle(450, 750) }
 
-        val tile = findLeerParaGanarTile()
-        if (tile == null) {
-            FarmerLog.w("[${account.label}] read-to-earn: 'Leer para ganar' tile not found")
-            primitives.backToBingHome()
-            return TaskResult.Skipped("Leer para ganar tile not found")
-        }
-        FarmerLog.i("[${account.label}] read-to-earn: tile @y=${tile.boundsT} size=${tile.width}x${tile.height}")
-        primitives.host.tapCoord(tile.centerX.toFloat(), tile.centerY.toFloat())
-        primitives.idle(2_500, 3_500)
-
-        if (panel.isHubVisible(900L)) {
-            FarmerLog.w("[${account.label}] read-to-earn: tap on tile didn't navigate")
-            primitives.backToBingHome()
-            return TaskResult.Skipped("tap on Leer para ganar didn't navigate")
+        // Verify feed is actually visible. If not, scroll a few more times
+        // before giving up — some builds push the strip further down after
+        // a "glance" carousel or a promo card.
+        if (findFeedCards().isEmpty()) {
+            FarmerLog.d("[${account.label}] read-to-earn: no feed cards yet, scrolling further")
+            repeat(3) { primitives.scrollDown(0.7f); primitives.idle(450, 750) }
+            if (findFeedCards().isEmpty()) {
+                FarmerLog.w("[${account.label}] read-to-earn: feed not visible on Inicio")
+                primitives.backToBingHome()
+                return TaskResult.Skipped("feed not visible on Inicio")
+            }
         }
 
         val visitedKeys = mutableSetOf<String>()
@@ -145,120 +146,15 @@ class BingReadToEarnRunner(
         }
 
         FarmerLog.i("[${account.label}] read-to-earn: read=$read ads=$skippedAds videos=$skippedVideos target=$targetArticles")
-        primitives.host.back(); primitives.idle(500, 900)
+        // No back() here — we end on Inicio (scrolled deep), and hitting
+        // back on Inicio closes Bing. backToBingHome taps the Inicio tab,
+        // which scrolls the feed back to the top.
         primitives.backToBingHome()
         return if (read == 0) TaskResult.Skipped("no articles read")
         else TaskResult.Ok(
             pointsClaimed = read * 3,
             detail = "$read articles, $skippedAds ads, $skippedVideos videos skipped",
         )
-    }
-
-    /**
-     * Find the "Leer para ganar" tile inside Actividades diarias.
-     *
-     * Previous version scrolled down up to 14 times blindly; if the tile
-     * flashed past (a11y lag) or the hub opened pre-scrolled, we'd overshoot
-     * and never come back. New strategy:
-     *   1. Direct match on the current viewport — maybe we're already there.
-     *   2. Anchor on the "Actividades diarias" / "Daily activities" section
-     *      header via scrollUntil. The tile lives in a ~2-screen band below.
-     *   3. Bounded scan with scroll-UP recovery when the header leaves the
-     *      viewport (= we overshot). Stale-signature exit keeps it from
-     *      scrolling into empty hub tail when the tile really isn't there.
-     *
-     * Match criteria relaxed: height 80..520 (was 100..400) and if a desc
-     * match is found without any shape constraint, trust it — the phrase
-     * "Leer para ganar" is unique enough in the hub that the drawable can
-     * only be the tile.
-     */
-    private suspend fun findLeerParaGanarTile(): AutomationNode? {
-        // 1. Already in view?
-        directMatchReadToEarn()?.let { return it }
-
-        // 2. Anchor on section header. Caller already reset the hub to top.
-        val header = primitives.scrollUntil(maxScrolls = 8, fraction = 0.5f) {
-            primitives.host.findByText("Actividades diarias", 400L)
-                ?: primitives.host.findByText("Daily activities", 300L)
-        }
-        if (header == null) {
-            FarmerLog.d("read-to-earn: 'Actividades diarias' header not found, last-ditch viewport scan")
-            return directMatchReadToEarn()
-        }
-        FarmerLog.d("read-to-earn: anchored on 'Actividades diarias' @y=${header.boundsT}")
-
-        // 3. Bounded band below header; scroll-up recovery on overshoot.
-        var stale = 0
-        var lastSig = primitives.pageSignature()
-        for (attempt in 0 until 10) {
-            directMatchReadToEarn()?.let { return it }
-            if (!panel.isHubVisible(300L)) {
-                FarmerLog.d("read-to-earn: hub no longer visible, abort tile search")
-                break
-            }
-
-            val stillHaveHeader = primitives.host.findByText("Actividades diarias", 300L)
-                ?: primitives.host.findByText("Daily activities", 200L)
-            if (stillHaveHeader == null) {
-                FarmerLog.d("read-to-earn: lost section header (overshot), scroll up")
-                primitives.scrollUp(0.5f); primitives.idle(400, 700)
-                stale = 0
-                lastSig = primitives.pageSignature()
-                continue
-            }
-
-            primitives.scrollDown(0.45f); primitives.idle(400, 700)
-            val sig = primitives.pageSignature()
-            if (sig == lastSig) {
-                stale++
-                if (stale >= 3) {
-                    FarmerLog.d("read-to-earn: $stale stale scrolls under header, give up")
-                    break
-                }
-            } else {
-                stale = 0
-                lastSig = sig
-            }
-        }
-        return null
-    }
-
-    /**
-     * Try to match the Read-to-Earn tile in the current viewport. Primary
-     * picks the largest clickable View that both matches the desc hint and
-     * has a tile-like shape. Fallback picks ANY clickable with a desc hit —
-     * if Bing re-skins the tile's bounds, the desc text is still the
-     * definitive signal.
-     */
-    private suspend fun directMatchReadToEarn(): AutomationNode? {
-        val screenW = primitives.host.screenWidth
-        val classes = listOf(
-            "android.view.View", "android.view.ViewGroup",
-            "android.widget.FrameLayout", "android.widget.LinearLayout",
-            "android.widget.RelativeLayout",
-        )
-        val all = buildList { for (c in classes) addAll(primitives.host.findByClass(c)) }
-            .distinctBy { it.handle }
-        val hints = BingPackage.READ_TO_EARN_HINTS
-
-        fun matchesDesc(n: AutomationNode): Boolean {
-            val d = n.contentDescription?.toString() ?: return false
-            return hints.any { d.contains(it, ignoreCase = true) }
-        }
-
-        // Primary: shape-correct tile.
-        val tile = all
-            .filter { n ->
-                n.visible && n.clickable &&
-                    n.width > screenW * 0.5 &&
-                    n.height in 80..520 &&
-                    matchesDesc(n)
-            }
-            .maxByOrNull { it.width * it.height }
-        if (tile != null) return tile
-
-        // Fallback: desc match wins regardless of shape.
-        return all.firstOrNull { it.visible && it.clickable && matchesDesc(it) }
     }
 
     private data class FeedCard(
