@@ -10,49 +10,160 @@ import com.zero.rewards.core.log.FarmerLog
  *
  * Entry flow (per operator spec):
  *   1. Go to Bing Inicio (the home tab).
- *   2. Scroll down a few viewport fractions — the Para Ti / Noticias feed
- *      lives directly below the fold on Inicio. Same card surface the
- *      Rewards "Leer para ganar" tile would land us on, reached in one
- *      step instead of hunting a tile that drifts across hub revisions.
+ *   2. Scroll down a few viewport fractions — the news feed (a WebView under
+ *      the glance row) starts ~1.5 viewports below the search bar.
  *   3. In the feed, pick cards that are neither ads nor videos. Tap each.
  *   4. Dwell 3-3.5 s inside the article — enough for the read credit.
  *   5. Back → scroll past the just-read article → next.
  *
  * Cap: 10 articles × 3 pts = 30 pts per day (Microsoft Rewards daily cap).
  *
- * Card structure observed on current Bing build (screen 1080x2460):
- *   Each feed card exposes 3-4 sibling Views at the SAME bounds,
- *   xy=(50, Y), width=980, height 174..778:
- *     - a visual wrapper (click=false, desc=null)
- *     - the tap target (click=true, desc=null)  ← we tap this
- *     - a desc sibling (click=false, desc="<title + source>")
- *     - optionally an inner image View at xy=(80, Y+30), width=920
+ * Feed structure seen in the 2026-11-21 dump (screen 1080x2460, Bing 34.4.x):
+ *   - The tap target of a card is its TITLE: a plain `View`, clickable, x=60,
+ *     ~960 wide, 52..105 tall, contentDescription = headline, no text. A
+ *     sibling TextView at the same bounds carries the same headline as text.
+ *   - The title sits at the bottom of a non-clickable 960x775 image View.
+ *     Below it: 'Ver más' / 'Compartir' Buttons and a 'Más como este'
+ *     ToggleButton — never tapped.
+ *   - A sticky header (search 'Buscar' Button, bottom ~333) covers the top
+ *     of the viewport and the bottom nav starts at y~2200: titles outside
+ *     that band are "visible" to accessibility but not tappable.
  *
  * Ad signals (any match → skip):
- *   - desc contains "Anuncio" as a word (ad slots end their desc with
- *     ". Anuncio," before the sponsor info)
- *   - nested TextView with EXACT text "Anuncio" inside the card bounds
- *   - nested View with desc "Privacidad de los anuncios" inside bounds
+ *   - headline desc contains the word 'Anuncio' / 'Patrocinado'
+ *   - a 'Patrocinado' text/desc or a 'Selección de anuncio' desc within the
+ *     220 px below the title
+ *   - an Image whose viewId starts with 'nativead' ending right above the title
  *
- * Video signals (any match → skip):
- *   - desc contains "Reproducir" (truncated "Reproducir vídeo")
- *   - desc contains a known video platform: Dailymotion / YouTube /
- *     Vimeo / TikTok / Twitch
- *   - nested View with desc "Reproducir vídeo" inside the card bounds
- *   - duration pattern mm:ss in a nested TextView inside the card
- *
- * Non-targets excluded by the selector (width/left-edge filter):
- *   - top "glance_card" tiles (Rewards/Generador imágenes/Dinero) — 290..350 wide
- *   - "Más" context buttons — 120x120
- *   - "Abrir artículo" button — 360x120
- *   - bottom nav icons — 140x140, outside band anyway
+ * Video signals (UNVERIFIED — the dump had no video card): 'Reproducir' in the
+ * desc, a known video platform in the desc, a 'Reproducir vídeo' desc or an
+ * mm:ss badge inside the card's image area.
  */
 class BingReadToEarnRunner(
     private val primitives: BingPrimitives,
     private val targetArticles: Int = 10,
 ) {
 
+    /**
+     * Structure dump mode (HANDOFF REGLA CERO) — replaces the farm while
+     * [StructureDumpMode.READ_TO_EARN] is on. Goes to Inicio, dumps it, scrolls
+     * down in 6 calibrated 0.7 steps dumping at each stop together with what
+     * the feed selector finds there, then taps ONE non-ad article (tapCoord on
+     * its title), dumps the article screen, presses BACK and dumps again. A
+     * final 60 s watch lets the operator wander by hand (e.g. the Rewards hub).
+     */
+    private suspend fun dumpStructure(account: Account): TaskResult {
+        val dump = BingStructureDump(primitives.host)
+        if (!primitives.ensureBingForeground()) return TaskResult.Skipped("Bing not foreground")
+        if (!primitives.backToBingHome()) return TaskResult.Skipped("Bing Inicio not reachable")
+        primitives.idle(800, 1_200)
+
+        dump.snapshot("R2E/INICIO_TOP")
+        probeFeed("INICIO_TOP")
+        for (step in 1..6) {
+            primitives.scrollDown(0.7f); primitives.idle(700, 1_000)
+            dump.snapshot("R2E/SCROLL_$step")
+            probeFeed("SCROLL_$step")
+        }
+
+        val target = findFeedCards().firstOrNull { !it.isAd && !it.isVideo }
+        if (target == null) {
+            FarmerLog.w("[${account.label}] R2E DUMP: no non-ad card in the tappable band at SCROLL_6 — article not dumped")
+        } else {
+            FarmerLog.i("[${account.label}] R2E DUMP: tapCoord on '${target.desc.take(60)}' ${target.tapTarget.describe()}")
+            primitives.host.tapCoord(target.tapTarget.centerX.toFloat(), target.tapTarget.centerY.toFloat())
+            primitives.idle(4_000, 4_800)
+            dump.snapshot("R2E/ARTICLE")
+            FarmerLog.d("R2E DUMP: after tap onFeed=${onFeed()} pkg=${primitives.host.currentPackage()}")
+            primitives.host.back()
+            primitives.idle(1_500, 2_200)
+            dump.snapshot("R2E/AFTER_BACK")
+            probeFeed("AFTER_BACK")
+        }
+
+        FarmerLog.i("[${account.label}] R2E DUMP: 60 s free watch — optionally open the Rewards hub and its 'Leer para ganar' entry by hand")
+        dump.watch("R2E", durationMs = 60_000L)
+
+        primitives.backToBingHome()
+        return TaskResult.Skipped("structure dump mode — see R2E DUMP log")
+    }
+
+    /** Read-only: what the feed selector finds at the current scroll position. */
+    private suspend fun probeFeed(where: String) {
+        val cards = findFeedCards()
+        FarmerLog.d("FEED PROBE @$where: cards=${cards.size} onFeed=${onFeed()}")
+        for (c in cards) {
+            FarmerLog.d("  card y=${c.tapTarget.boundsT}..${c.tapTarget.boundsB} ad=${c.isAd} video=${c.isVideo} desc='${c.desc.take(60)}'")
+        }
+    }
+
+    /**
+     * Diagnostic (replaces the farm while [StructureDumpMode.READ_TO_EARN_VIDEO_HUNT]
+     * is on). The 2026-11-21 dump showed ads are covered, but a card titled
+     * "Video: …" looked exactly like an article. Sweeps up to 14 feed positions,
+     * logs EVERY card once with its ad signals, whether it has the 'Compartir'
+     * meta row (ads don't) and how many nodes sit in its image area, snapshots
+     * the screen when a non-ad card lacks the meta row, and opens up to 2 "Video:"
+     * cards (tapCoord on the title) to dump what the player/article screen is.
+     */
+    private suspend fun videoHunt(account: Account): TaskResult {
+        val dump = BingStructureDump(primitives.host)
+        if (!primitives.ensureBingForeground()) return TaskResult.Skipped("Bing not foreground")
+        if (!primitives.backToBingHome()) return TaskResult.Skipped("Bing Inicio not reachable")
+        primitives.idle(800, 1_200)
+        FarmerLog.i("[${account.label}] VIDEO HUNT: sweeping the feed — every card is logged with its signals")
+        repeat(3) { primitives.scrollDown(0.7f); primitives.idle(450, 750) }
+
+        val seen = mutableSetOf<String>()
+        var opened = 0
+        var anomalySnapshots = 0
+        for (step in 1..14) {
+            val all = snapshotVisible()
+            val cards = findFeedCards()
+            var candidate: FeedCard? = null
+            var anomaly = false
+            for (c in cards) {
+                if (!seen.add(descKey(c.desc))) continue
+                val t = c.tapTarget
+                val signals = adSignals(t, c.desc, all)
+                val hasMeta = all.any { n ->
+                    n.boundsT in t.boundsB..(t.boundsB + 260) &&
+                        n.contentDescription?.trim().equals("Compartir", ignoreCase = true)
+                }
+                val inArea = all.count { n ->
+                    n.boundsT in (t.boundsB - 780)..(t.boundsB + 120) &&
+                        n.boundsL >= t.boundsL - 20 && n.boundsR <= t.boundsR + 20
+                }
+                FarmerLog.d("HUNT step=$step card y=${t.boundsT}..${t.boundsB} adSignals=$signals video=${c.isVideo} meta=$hasMeta areaNodes=$inArea desc='${c.desc.take(70)}'")
+                if (candidate == null && c.isVideo && !c.isAd && opened < 2) candidate = c
+                if (!hasMeta && signals.isEmpty()) anomaly = true
+            }
+            if (anomaly && anomalySnapshots < 3) {
+                anomalySnapshots++
+                dump.snapshot("HUNT/NO_META_step$step")
+            }
+            if (candidate != null) {
+                opened++
+                dump.snapshot("HUNT/VIDEO_CARD_FEED_step$step")
+                FarmerLog.i("[${account.label}] VIDEO HUNT: tapCoord on '${candidate.desc.take(60)}' ${candidate.tapTarget.describe()}")
+                primitives.host.tapCoord(candidate.tapTarget.centerX.toFloat(), candidate.tapTarget.centerY.toFloat())
+                primitives.idle(4_000, 4_800)
+                dump.snapshot("HUNT/VIDEO_ARTICLE_$opened")
+                FarmerLog.d("HUNT: after tap onFeed=${onFeed()}")
+                primitives.host.back()
+                primitives.idle(1_500, 2_200)
+            }
+            primitives.scrollDown(0.7f); primitives.idle(700, 1_000)
+        }
+        FarmerLog.i("[${account.label}] VIDEO HUNT: done — cards seen=${seen.size} videoOpened=$opened noMetaSnapshots=$anomalySnapshots")
+        primitives.backToBingHome()
+        return TaskResult.Skipped("structure dump mode — see VIDEO HUNT log")
+    }
+
     suspend fun run(account: Account): TaskResult {
+        if (StructureDumpMode.READ_TO_EARN) return dumpStructure(account)
+        if (StructureDumpMode.READ_TO_EARN_VIDEO_HUNT) return videoHunt(account)
+
         // Reach Inicio. backToBingHome handles the "already there / tap
         // Inicio tab / relaunch" cascade internally.
         if (!primitives.backToBingHome()) {
@@ -164,123 +275,114 @@ class BingReadToEarnRunner(
         val isVideo: Boolean,
     )
 
+    private companion object {
+        // Title View geometry from the 2026-11-21 dump: x=60, 960 wide, 52..105 tall.
+        val TITLE_LEFT = 50..70
+        val TITLE_WIDTH = 900..1_000
+        val TITLE_HEIGHT = 40..160
+        val AD_WORD = Regex("""\b(Anuncio|Patrocinado)\b""", RegexOption.IGNORE_CASE)
+        val DURATION = Regex("""\b\d{1,2}:\d{2}\b""")
+        // 2026-11-21 dumps (25 cards): video cards expose NO badge / 'Reproducir' / extra node, and
+        // the article page is an empty WebView, so the only signal left is the word in the title.
+        // Heuristic: it also skips some plain articles that merely mention a video — cheap.
+        val VIDEO_TITLE = Regex("""\bv[ií]deos?\b""", RegexOption.IGNORE_CASE)
+        val VIDEO_PLATFORM =Regex("""\b(Dailymotion|YouTube|Vimeo|TikTok|Twitch)\b""", RegexOption.IGNORE_CASE)
+    }
+
+    /** One accessibility snapshot, visible non-empty nodes only. */
+    private suspend fun snapshotVisible(): List<AutomationNode> =
+        primitives.host.snapshotTree(DumpFormat.FETCH_DEPTH)
+            .map { it.node }
+            .filter { it.visible && it.width > 0 && it.height > 0 }
+
     /**
-     * Enumerate feed cards. A card = clickable wrapper View paired with
-     * its desc sibling by exact bounds. Returned sorted top-to-bottom,
-     * deduped by exact bounds (two click=true at same pos → keep one).
+     * Y band where a title can actually be tapped: below the sticky search
+     * header and above the bottom nav. Falls back to screen fractions when
+     * either anchor isn't on screen (e.g. Inicio not scrolled yet).
+     */
+    private fun feedBand(all: List<AutomationNode>): Pair<Int, Int> {
+        val screenH = primitives.host.screenHeight
+        val search = all.firstOrNull { n ->
+            n.clickable && n.width >= 900 && n.boundsT < screenH * 0.3 &&
+                n.contentDescription?.trim().equals("Buscar", ignoreCase = true)
+        }
+        val nav = all.firstOrNull { n ->
+            n.clickable && n.boundsT > screenH * 0.8 &&
+                (n.contentDescription?.trim().equals("Cámara", ignoreCase = true) ||
+                    n.contentDescription?.trim().equals("Copilot", ignoreCase = true))
+        }
+        val top = (search?.boundsB ?: (screenH * 0.12).toInt()) + 25
+        val bot = nav?.boundsT ?: (screenH * 0.89).toInt()
+        return top to bot
+    }
+
+    /**
+     * Enumerate feed cards. A card = clickable title View (see the class KDoc)
+     * fully inside the tappable band. Returned sorted top-to-bottom.
      */
     private suspend fun findFeedCards(): List<FeedCard> {
-        val screenH = primitives.host.screenHeight
-        val bandTop = (screenH * 0.08).toInt()
-        val bandBot = (screenH * 0.88).toInt()
+        val all = snapshotVisible()
+        val (bandTop, bandBot) = feedBand(all)
 
-        val classes = listOf(
-            "android.view.View", "android.view.ViewGroup",
-            "android.widget.FrameLayout", "android.widget.LinearLayout",
-            "android.widget.TextView",
-        )
-        val all = buildList { for (c in classes) addAll(primitives.host.findByClass(c)) }
-            .distinctBy { it.handle }
-            .filter { it.visible }
-
-        val wrappers = all.filter { n ->
+        val titles = all.filter { n ->
             n.clickable &&
-                n.boundsT in bandTop..bandBot &&
-                n.width >= 900 &&
-                n.boundsL in 40..60 &&
-                n.contentDescription.isNullOrBlank() &&
+                n.className?.substringAfterLast('.') == "View" &&
+                n.boundsL in TITLE_LEFT &&
+                n.width in TITLE_WIDTH &&
+                n.height in TITLE_HEIGHT &&
                 n.text.isNullOrBlank() &&
-                n.height in 150..900
+                !n.contentDescription.isNullOrBlank() &&
+                n.boundsT >= bandTop && n.boundsB <= bandBot
         }.sortedBy { it.boundsT }
 
-        val cards = mutableListOf<FeedCard>()
-        val usedBoundsKeys = mutableSetOf<String>()
-        for (w in wrappers) {
-            val boundsKey = "${w.boundsL},${w.boundsT},${w.boundsR},${w.boundsB}"
-            if (boundsKey in usedBoundsKeys) continue
-            usedBoundsKeys += boundsKey
-
-            // Prefer the desc sibling with EXACT bounds match (full title + source).
-            val descNode = all.firstOrNull { n ->
-                !n.clickable &&
-                    n.boundsL == w.boundsL && n.boundsT == w.boundsT &&
-                    n.boundsR == w.boundsR && n.boundsB == w.boundsB &&
-                    !n.contentDescription.isNullOrBlank()
-            } ?: all.firstOrNull { n ->
-                // Fallback: inner image child (xy=~(80, Y+30), width ≥ 800).
-                n.boundsT in w.boundsT..w.boundsB &&
-                    n.boundsL >= w.boundsL && n.boundsR <= w.boundsR &&
-                    n.width > 800 && !n.contentDescription.isNullOrBlank()
-            }
-            if (descNode == null) {
-                FarmerLog.d("feed: wrapper @y=${w.boundsT} with no desc sibling, skip")
-                continue
-            }
-            val desc = descNode.contentDescription!!.toString().trim()
-            cards += FeedCard(w, desc, isAdCard(w, desc, all), isVideoCard(w, desc, all))
+        return titles.map { t ->
+            val desc = t.contentDescription!!.trim()
+            FeedCard(t, desc, isAdCard(t, desc, all), isVideoCard(t, desc, all))
         }
-        return cards
+    }
+
+    /** Ad detection — signals listed in the class KDoc. */
+    private fun isAdCard(title: AutomationNode, desc: String, all: List<AutomationNode>): Boolean =
+        adSignals(title, desc, all).isNotEmpty()
+
+    /** Names of the ad signals that fire for this title ("word", "chip", "image"); empty = not an ad. */
+    private fun adSignals(title: AutomationNode, desc: String, all: List<AutomationNode>): List<String> = buildList {
+        if (AD_WORD.containsMatchIn(desc)) add("word")
+
+        val chipTop = title.boundsT - 20
+        val chipBot = title.boundsB + 220
+        if (all.any { n ->
+                n !== title && n.boundsT in chipTop..chipBot &&
+                    (n.text?.trim().equals("Patrocinado", ignoreCase = true) ||
+                        n.contentDescription?.trim().equals("Patrocinado", ignoreCase = true) ||
+                        n.contentDescription?.contains("Selección de anuncio", ignoreCase = true) == true)
+            }
+        ) add("chip")
+
+        if (all.any { n ->
+                n.viewId?.substringAfterLast('/')?.startsWith("nativead") == true &&
+                    n.boundsB in (title.boundsT - 100)..(title.boundsT + 30)
+            }
+        ) add("image")
     }
 
     /**
-     * Ad detection. Returns true on any of:
-     *   - desc contains "Anuncio" as a word (chip text embedded in desc).
-     *   - nested TextView text="Anuncio" exactly (case-insensitive)
-     *     within the card bounds.
-     *   - nested View with desc containing "Privacidad de los anuncios"
-     *     within the card bounds.
+     * Video detection — UNVERIFIED, there was no video card in the dump. Looks
+     * at the title desc and at the card's image area (up to 780 px above the
+     * title) for 'Reproducir' / a platform name / a small mm:ss badge.
      */
-    private fun isAdCard(
-        wrapper: AutomationNode,
-        desc: String,
-        all: List<AutomationNode>,
-    ): Boolean {
-        if (Regex("""\bAnuncio\b""", RegexOption.IGNORE_CASE).containsMatchIn(desc)) return true
-
-        val chip = all.firstOrNull { n ->
-            n.boundsT in wrapper.boundsT..wrapper.boundsB &&
-                n.boundsL in wrapper.boundsL..wrapper.boundsR &&
-                n.text?.toString()?.trim().equals("Anuncio", ignoreCase = true)
-        }
-        if (chip != null) return true
-
-        val privacyChip = all.firstOrNull { n ->
-            n.boundsT in wrapper.boundsT..wrapper.boundsB &&
-                n.boundsL in wrapper.boundsL..wrapper.boundsR &&
-                n.contentDescription?.toString()?.contains("Privacidad de los anuncios", ignoreCase = true) == true
-        }
-        return privacyChip != null
-    }
-
-    /**
-     * Video detection. Returns true on any of:
-     *   - desc contains "Reproducir" (truncated "Reproducir vídeo").
-     *   - desc contains a known video-platform source as a word.
-     *   - nested View with desc containing "Reproducir vídeo" inside bounds.
-     *   - duration pattern mm:ss in a nested TextView inside bounds.
-     */
-    private fun isVideoCard(
-        wrapper: AutomationNode,
-        desc: String,
-        all: List<AutomationNode>,
-    ): Boolean {
+    private fun isVideoCard(title: AutomationNode, desc: String, all: List<AutomationNode>): Boolean {
         if (desc.contains("Reproducir", ignoreCase = true)) return true
-        if (Regex("""\b(Dailymotion|YouTube|Vimeo|TikTok|Twitch)\b""", RegexOption.IGNORE_CASE).containsMatchIn(desc)) return true
+        if (VIDEO_PLATFORM.containsMatchIn(desc) || VIDEO_TITLE.containsMatchIn(desc)) return true
 
-        val playNode = all.firstOrNull { n ->
-            n.boundsT in wrapper.boundsT..wrapper.boundsB &&
-                n.boundsL in wrapper.boundsL..wrapper.boundsR &&
-                n.contentDescription?.toString()?.contains("Reproducir vídeo", ignoreCase = true) == true
+        val areaTop = title.boundsB - 780
+        val areaBot = title.boundsB + 120
+        return all.any { n ->
+            n !== title && n.boundsT in areaTop..areaBot &&
+                n.boundsL >= title.boundsL - 20 && n.boundsR <= title.boundsR + 20 &&
+                (n.contentDescription?.contains("Reproducir vídeo", ignoreCase = true) == true ||
+                    (n.width < 400 && DURATION.containsMatchIn(n.text ?: "")))
         }
-        if (playNode != null) return true
-
-        val durationRx = Regex("""\b\d{1,2}:\d{2}\b""")
-        val durNode = all.firstOrNull { n ->
-            n.boundsT in wrapper.boundsT..wrapper.boundsB &&
-                n.boundsL in wrapper.boundsL..wrapper.boundsR &&
-                durationRx.containsMatchIn(n.text?.toString() ?: "")
-        }
-        return durNode != null
     }
 
     /**
@@ -328,7 +430,17 @@ class BingReadToEarnRunner(
                 FarmerLog.d("  tap OK on '$label'")
                 return true
             }
-            FarmerLog.d("  tap '$label' didn't navigate — retry")
+            // Run of 2026-11-21: 7 of 10 first taps timed out and the second one
+            // "worked" ~1 s later. Either the first tap was swallowed (scroll
+            // inertia) or the article just opened late. Re-check before tapping
+            // again so a late open doesn't get a second tap inside the article,
+            // and log which case it was.
+            primitives.idle(1_200, 1_500)
+            if (!onFeed()) {
+                FarmerLog.d("  tap '$label' opened LATE (article up only after the extra wait)")
+                return true
+            }
+            FarmerLog.d("  tap '$label' didn't navigate (still on feed after the extra wait) — retry")
         }
         return false
     }
@@ -337,33 +449,27 @@ class BingReadToEarnRunner(
      * Poll until the feed-card signature disappears from the current view,
      * meaning we've navigated off the feed into an article. Returns true
      * when navigated, false on timeout. 300 ms poll interval keeps the
-     * cost low; findByClass is fast enough on short timeouts.
+     * cost low.
      */
     private suspend fun waitArticleOpen(timeoutMs: Long = 5_000L): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         // Minimum settle time — the gesture needs at least a frame.
         primitives.idle(600, 900)
         while (System.currentTimeMillis() < deadline) {
-            if (!stillOnFeed()) return true
+            if (!onFeed()) return true
             primitives.idle(300, 450)
         }
         return false
     }
 
     /**
-     * True when the current view shows a feed-card wrapper (clickable
-     * View with boundsL ≈ 50, width ≥ 900, height 150..900, desc/text
-     * both null). This signature is unique to the news feed — article
-     * viewers render completely different hierarchies.
+     * True while the Inicio search bar (clickable 'Buscar' Button, 900+ wide)
+     * is on screen. ASSUMPTION, not yet seen in a dump: an opened article does
+     * not show it — the R2E/ARTICLE dump confirms or refutes this.
      */
-    private suspend fun stillOnFeed(): Boolean {
-        val views = primitives.host.findByClass("android.view.View")
-        return views.any { n ->
-            n.visible && n.clickable &&
-                n.boundsL in 40..60 && n.width >= 900 &&
-                n.height in 150..900 &&
-                n.contentDescription.isNullOrBlank() &&
-                n.text.isNullOrBlank()
+    private suspend fun onFeed(): Boolean =
+        snapshotVisible().any { n ->
+            n.clickable && n.width >= 900 &&
+                n.contentDescription?.trim().equals("Buscar", ignoreCase = true)
         }
-    }
 }

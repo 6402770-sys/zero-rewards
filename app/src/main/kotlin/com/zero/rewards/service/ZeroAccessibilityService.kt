@@ -12,6 +12,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.zero.rewards.core.automation.AutomationHost
 import com.zero.rewards.core.automation.AutomationNode
+import com.zero.rewards.core.automation.TreeNode
 import com.zero.rewards.core.log.FarmerLog
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
@@ -281,16 +282,32 @@ class ZeroAccessibilityService : AccessibilityService(), AutomationHost {
         return sb.toString()
     }
 
+    override suspend fun snapshotTree(maxDepth: Int): List<TreeNode> {
+        val root = rootInActiveWindow ?: return emptyList()
+        val out = ArrayList<TreeNode>()
+        fun rec(n: AccessibilityNodeInfo?, depth: Int) {
+            n ?: return
+            if (depth > maxDepth || out.size >= SNAPSHOT_TREE_MAX_NODES) return
+            out += TreeNode(snapshot(n, cache = false), depth)
+            for (i in 0 until n.childCount) rec(n.getChild(i), depth + 1)
+        }
+        rec(root, 0)
+        return out
+    }
+
     // ----- helpers -----
 
-    private fun snapshot(node: AccessibilityNodeInfo): AutomationNode {
+    /** [cache] = false for read-only dumps: the handle can't be resolved back to a live node. */
+    private fun snapshot(node: AccessibilityNodeInfo, cache: Boolean = true): AutomationNode {
         val b = Rect().also { node.getBoundsInScreen(it) }
         val handle = handleSeq.getAndIncrement()
-        nodeCache[handle] = node
-        // Keep the cache bounded — drop old handles.
-        if (nodeCache.size > 512) {
-            val keys = nodeCache.keys.sorted().take(nodeCache.size - 256)
-            keys.forEach { nodeCache.remove(it) }
+        if (cache) {
+            nodeCache[handle] = node
+            // Keep the cache bounded — drop old handles.
+            if (nodeCache.size > 512) {
+                val keys = nodeCache.keys.sorted().take(nodeCache.size - 256)
+                keys.forEach { nodeCache.remove(it) }
+            }
         }
         return AutomationNode(
             handle = handle,
@@ -307,6 +324,7 @@ class ZeroAccessibilityService : AccessibilityService(), AutomationHost {
             editable = node.isEditable,
             enabled = node.isEnabled,
             visible = node.isVisibleToUser,
+            hintText = if (android.os.Build.VERSION.SDK_INT >= 26) node.hintText?.toString() else null,
         )
     }
 
@@ -348,6 +366,8 @@ class ZeroAccessibilityService : AccessibilityService(), AutomationHost {
     }
 
     companion object {
+        /** Upper bound on nodes returned by [snapshotTree] so a runaway tree can't stall the dump. */
+        private const val SNAPSHOT_TREE_MAX_NODES = 3_000
         @Volatile private var instance: ZeroAccessibilityService? = null
         fun get(): ZeroAccessibilityService? = instance
     }

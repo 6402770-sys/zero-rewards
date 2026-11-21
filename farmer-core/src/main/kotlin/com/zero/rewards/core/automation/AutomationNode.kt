@@ -24,6 +24,8 @@ data class AutomationNode(
     val editable: Boolean,
     val enabled: Boolean,
     val visible: Boolean,
+    /** Placeholder text of an empty field (API 26+); null when absent or unsupported. */
+    val hintText: String? = null,
 ) {
     val centerX: Int get() = (boundsL + boundsR) / 2
     val centerY: Int get() = (boundsT + boundsB) / 2
@@ -38,3 +40,6 @@ data class AutomationNode(
         append(" @(").append(centerX).append(",").append(centerY).append(")")
     }
 }
+
+/** A node plus its depth in the accessibility tree; lists of these are in pre-order. */
+data class TreeNode(val node: AutomationNode, val depth: Int)

@@ -80,6 +80,13 @@ interface AutomationHost {
     /** Dump a short string of the visible UI tree. Used for diagnostics. */
     suspend fun dumpTree(maxDepth: Int = 8): String
 
+    /**
+     * Pre-order snapshot of the whole active-window tree down to [maxDepth],
+     * with full bounds / flags / untruncated text. Read-only; returns an
+     * empty list when there is no root. Used by the structure dump mode.
+     */
+    suspend fun snapshotTree(maxDepth: Int = 20): List<TreeNode>
+
     /** Screen width in pixels. */
     val screenWidth: Int
 

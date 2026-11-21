@@ -93,7 +93,10 @@ class FarmRun(
             if (account.bingEmail.isNotBlank()) {
                 errorMsg = runPhase(runId, "switch_account", null, errorMsg,
                     pointsAccum = { totalPoints += it }, account = account) {
-                    if (switcher.switchTo(account.bingEmail)) TaskResult.Ok(0, "on ${account.bingEmail}")
+                    if (StructureDumpMode.SWITCHER) {
+                        switcher.dumpStructure()
+                        TaskResult.Skipped("structure dump mode — see SWITCHER DUMP log")
+                    } else if (switcher.switchTo(account.bingEmail)) TaskResult.Ok(0, "on ${account.bingEmail}")
                     else TaskResult.Failed("could not switch to ${account.bingEmail}")
                 }
                 delay(Random.nextLong(800L, 2_000L))

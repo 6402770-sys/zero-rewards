@@ -65,6 +65,103 @@ class BingAccountSwitcher(private val primitives: BingPrimitives) {
     }
 
     /**
+     * Structure dump mode (HANDOFF REGLA CERO) — replaces [switchTo] while
+     * [StructureDumpMode.SWITCHER] is on. Taps only Inicio (via backToBingHome)
+     * and Perfil: dumps Home, probes the legacy selectors read-only, taps Perfil
+     * and dumps what opens, then records for 150 s while the operator continues
+     * BY HAND to the account list → picks the other account → confirms. One
+     * snapshot is printed each time the screen settles on a different layout.
+     */
+    suspend fun dumpStructure() {
+        val dump = BingStructureDump(primitives.host)
+        if (!primitives.ensureBingForeground()) {
+            FarmerLog.w("switcher dump: Bing didn't come to the foreground")
+            return
+        }
+        primitives.idle(600, 1_200)
+        primitives.backToBingHome()
+        primitives.idle(600, 1_000)
+
+        dump.snapshot("SWITCHER/HOME")
+        probeLegacySelectors()
+
+        // Inicio dump (10 snapshots on 2026-11-21) shows 'Perfil' as a clickable
+        // ImageView at the top-left; tap it with a real gesture and dump what opens.
+        val perfil = pickHeaderNode("Perfil", primitives.host.screenHeight, primitives.host.screenWidth)
+        if (perfil != null) {
+            FarmerLog.d("SWITCHER DUMP: tapCoord on ${perfil.describe()}")
+            primitives.host.tapCoord(perfil.centerX.toFloat(), perfil.centerY.toFloat())
+            primitives.idle(1_800, 2_500)
+            dump.snapshot("SWITCHER/AFTER_PERFIL_TAP")
+            exploreAccountList(dump)
+        } else {
+            FarmerLog.w("SWITCHER DUMP: 'Perfil' not found in the top-left zone — open it by hand")
+        }
+
+        FarmerLog.i("SWITCHER DUMP: continue BY HAND from wherever the Perfil tap landed (or from Inicio if nothing opened): account list → select the other account → confirm, at normal pace. Don't touch the phone for the first 5 s.")
+        dump.watch("SWITCHER", durationMs = 90_000L)
+        dump.snapshot("SWITCHER/END")
+        FarmerLog.i("SWITCHER DUMP: finished")
+    }
+
+    /**
+     * Dump mode only. The 2026-11-21 dump shows Perfil opens a full profile
+     * page: the active email sits in a clickable header View with a 'Reenviar'
+     * View (40x40, c=0) next to it. Tap that icon with a real gesture, dump
+     * what opens, then SELECT — never commit — the first visible account whose
+     * email differs from the active one, and dump again. No commit / sign-out
+     * button is ever tapped here.
+     */
+    private suspend fun exploreAccountList(dump: BingStructureDump) {
+        val screenH = primitives.host.screenHeight
+        suspend fun visibleNodes() = primitives.host.snapshotTree(DumpFormat.FETCH_DEPTH)
+            .map { it.node }
+            .filter { it.visible && it.width > 0 && it.height > 0 }
+
+        val profile = visibleNodes()
+        val activeEmail = profile.firstOrNull { it.text?.contains('@') == true && it.boundsT < screenH * 0.5 }
+            ?.text?.trim()
+        val icon = profile.firstOrNull {
+            it.contentDescription?.trim().equals("Reenviar", ignoreCase = true) && it.boundsT < screenH * 0.4
+        }
+        if (icon == null) {
+            FarmerLog.w("SWITCHER DUMP: no 'Reenviar' icon in the top 40% after the Perfil tap — open the account list by hand")
+            return
+        }
+        FarmerLog.d("SWITCHER DUMP: tapCoord on ${icon.describe()} (active email on screen: ${activeEmail != null})")
+        primitives.host.tapCoord(icon.centerX.toFloat(), icon.centerY.toFloat())
+        primitives.idle(1_800, 2_500)
+        dump.snapshot("SWITCHER/AFTER_REENVIAR_TAP")
+
+        val row = visibleNodes()
+            .filter { n -> n.text?.trim()?.let { it.contains('@') && it != activeEmail } == true }
+            .minByOrNull { it.boundsT }
+        if (row == null) {
+            FarmerLog.w("SWITCHER DUMP: no other-account email row visible after the Reenviar tap")
+            return
+        }
+        FarmerLog.d("SWITCHER DUMP: tapCoord on ${row.describe()} — selecting only, NOT committing")
+        primitives.host.tapCoord(row.centerX.toFloat(), row.centerY.toFloat())
+        primitives.idle(1_200, 1_800)
+        dump.snapshot("SWITCHER/AFTER_SELECT_ROW")
+    }
+
+    /** Read-only: report what the pre-update selectors would find right now. */
+    private suspend fun probeLegacySelectors() {
+        val screenH = primitives.host.screenHeight
+        val screenW = primitives.host.screenWidth
+        FarmerLog.d("LEGACY PROBE openPerfilDrawer: accepts y<${(screenH * 0.15).toInt()} and x<${(screenW * 0.30).toInt()}")
+        for (desc in listOf("Perfil", "Profile", "Cuenta", "Account", "Avatar")) {
+            val n = primitives.host.findByContentDesc(desc, 300L)
+            if (n == null) {
+                FarmerLog.d("LEGACY PROBE contentDesc '$desc': not found")
+            } else {
+                FarmerLog.d("LEGACY PROBE contentDesc '$desc': ${n.describe()} bounds=(${n.boundsL},${n.boundsT},${n.boundsR},${n.boundsB}) visible=${n.visible} passesTopLeftFilter=${pickHeaderNode(desc, screenH, screenW) != null}")
+            }
+        }
+    }
+
+    /**
      * From the Perfil drawer, open the account-list screen and tap the target
      * email. Tries, in order:
      *   1. A direct switcher link ("Administrar cuentas", "Cambiar cuenta",
@@ -78,22 +175,26 @@ class BingAccountSwitcher(private val primitives: BingPrimitives) {
      * Returns true the moment a tap is dispatched on [targetEmail].
      */
     private suspend fun openAccountListAndTap(targetEmail: String): Boolean {
-        // Path 1: direct switcher link.
-        findSwitcherLink()?.let { link ->
-            FarmerLog.d("switcher path 1: link ${link.describe()}")
-            primitives.host.tap(link); primitives.idle(800, 1_500)
+        // Path 1: "Reenviar" icon next to the active email on the profile page.
+        // Verified in the 2026-11-21 dump: a real gesture (tapCoord) on it opens
+        // the Cuentas screen. First because it is the live path and the others
+        // below burn ~5 s of findByText timeouts when they miss.
+        findReenviarIcon()?.let { icon ->
+            FarmerLog.d("switcher path 1: Reenviar icon ${icon.describe()}")
+            primitives.host.tapCoord(icon.centerX.toFloat(), icon.centerY.toFloat())
+            primitives.idle(1_200, 1_800)
             if (tapTargetEmail(targetEmail)) return true
+            if (stillOnCuentasScreen()) {
+                FarmerLog.w("switcher: Cuentas screen is open but $targetEmail is not listed — not signed in to Bing?")
+                return false
+            }
         }
 
-        // Path 2: "Reenviar" icon next to the active email in the drawer header.
-        findReenviarIcon()?.let { icon ->
-            FarmerLog.d("switcher path 2: Reenviar icon ${icon.describe()}")
-            primitives.host.tap(icon); primitives.idle(900, 1_600)
+        // Path 2: direct switcher link — older Bing versions.
+        findSwitcherLink()?.let { link ->
+            FarmerLog.d("switcher path 2: link ${link.describe()}")
+            primitives.host.tap(link); primitives.idle(800, 1_500)
             if (tapTargetEmail(targetEmail)) return true
-            findSwitcherLink()?.let { link ->
-                primitives.host.tap(link); primitives.idle(800, 1_500)
-                if (tapTargetEmail(targetEmail)) return true
-            }
         }
 
         // Path 3: tap the currently-displayed active email row.
@@ -171,15 +272,35 @@ class BingAccountSwitcher(private val primitives: BingPrimitives) {
             }
         }
         if (!committed) {
-            FarmerLog.d("switcher: no commit button found — switch may be instant")
+            FarmerLog.w("switcher: no commit button found — switch may be instant")
             primitives.idle(1_500, 2_500)
         }
+
+        // The Cuentas → select → "Cambiar ahora" steps are dump-verified; what
+        // Bing shows AFTER the commit is not. Trace it until it is.
+        if (StructureDumpMode.POST_COMMIT_TRACE) traceAfterCommit(committed)
 
         if (stillOnCuentasScreen()) {
             FarmerLog.w("switcher: Cuentas screen still visible after commit. dump:")
             dumpCuentasScreen(row)
         }
         return true
+    }
+
+    /**
+     * Diagnostic: snapshot whatever Bing shows right after the commit tap and
+     * again 3, 6 and 10 s later (login spinner, re-home, splash, an error…).
+     * Read-only; turn off with [StructureDumpMode.POST_COMMIT_TRACE].
+     */
+    private suspend fun traceAfterCommit(committed: Boolean) {
+        val dump = BingStructureDump(primitives.host)
+        FarmerLog.i("SWITCH TRACE: commit tapped=$committed — snapshots now, +3 s, +6 s, +10 s")
+        var elapsed = 0
+        for (wait in listOf(0, 3, 3, 4)) {
+            if (wait > 0) primitives.idle(wait * 1_000L, wait * 1_000L + 100)
+            elapsed += wait
+            dump.snapshot("SWITCH/AFTER_COMMIT_+${elapsed}s")
+        }
     }
 
     /** True when a "seleccionado" marker appears somewhere on screen. */
@@ -315,8 +436,11 @@ class BingAccountSwitcher(private val primitives: BingPrimitives) {
             ?: pickHeaderNode("Account", screenH, screenW)
             ?: pickHeaderNode("Avatar", screenH, screenW)
             ?: return false
-        FarmerLog.d("openPerfilDrawer: tap ${perfil.describe()}")
-        primitives.host.tap(perfil)
+        // Real gesture: tapCoord on this node is what opened the profile page in
+        // the 2026-11-21 dump (HANDOFF rule 1 — don't rely on ACTION_CLICK).
+        FarmerLog.d("openPerfilDrawer: tapCoord ${perfil.describe()}")
+        primitives.host.tapCoord(perfil.centerX.toFloat(), perfil.centerY.toFloat())
+        primitives.idle(900, 1_400)
         return true
     }
 
