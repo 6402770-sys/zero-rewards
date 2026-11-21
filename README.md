@@ -131,6 +131,9 @@ every activity turned on.
   - load the developer's GitHub avatar on the *Credits* screen.
 - The Bing app talks to Microsoft as it always does.
 - The Accessibility service only acts on the Bing app.
+- Read to earn takes screenshots of the Bing screen to tell whether a feed card is
+  an autoplaying video (it skips those). They are shrunk, compared in memory and
+  thrown away: nothing is saved or sent anywhere.
 
 ## Troubleshooting
 
