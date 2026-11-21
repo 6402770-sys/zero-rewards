@@ -3,6 +3,7 @@ package com.zero.rewards.core.runner
 import com.zero.rewards.core.account.Account
 import com.zero.rewards.core.automation.AutomationNode
 import com.zero.rewards.core.automation.BingPrimitives
+import com.zero.rewards.core.automation.FrameMotion
 import com.zero.rewards.core.log.FarmerLog
 
 /**
@@ -226,14 +227,27 @@ class BingReadToEarnRunner(
                     skippedAds++
                     primitives.scrollDown(0.4f); primitives.idle(300, 500)
                 }
-                next.isVideo -> {
-                    FarmerLog.d("[${account.label}] skip VIDEO: '${next.desc.take(50)}'")
-                    skippedVideos++
-                    primitives.scrollDown(0.4f); primitives.idle(300, 500)
-                }
                 else -> {
+                    // Feed videos autoplay (muted) about a second after entering view and
+                    // the play icon disappears, so decide by motion in the image area.
+                    // The title heuristic only applies when screenshots are unavailable.
+                    primitives.idle(900, 1_200)
+                    var card = next
+                    if (imageVisiblePx(card) < MIN_IMAGE_PX) {
+                        // 2026-11-21 run: 3 of 10 cards had their thumbnail hidden under the
+                        // sticky header, so the motion test couldn't run. Bring the card down.
+                        primitives.scrollUp(0.25f); primitives.idle(1_000, 1_300)
+                        card = findFeedCards().firstOrNull { descKey(it.desc) == descKey(next.desc) } ?: card
+                    }
+                    val playing = looksLikePlayingVideo(card)
+                    if (playing == true || (playing == null && card.isVideo)) {
+                        FarmerLog.d("[${account.label}] skip VIDEO (${if (playing == true) "motion" else "title heuristic"}): '${next.desc.take(50)}'")
+                        skippedVideos++
+                        primitives.scrollDown(0.4f); primitives.idle(300, 500)
+                        continue
+                    }
                     FarmerLog.i("[${account.label}] read #${read + 1}/$targetArticles (attempt): '${next.desc.take(60)}'")
-                    val navigated = tapUntilOpen(next.tapTarget, next.desc)
+                    val navigated = tapUntilOpen(card.tapTarget, card.desc)
                     if (!navigated) {
                         FarmerLog.w("[${account.label}] tap on '${next.desc.take(30)}' failed to open after retries — skip, not counted")
                         primitives.scrollDown(0.4f); primitives.idle(300, 500)
@@ -281,6 +295,14 @@ class BingReadToEarnRunner(
         val TITLE_WIDTH = 900..1_000
         val TITLE_HEIGHT = 40..160
         val AD_WORD = Regex("""\b(Anuncio|Patrocinado)\b""", RegexOption.IGNORE_CASE)
+        /** Share of sampled image pixels that must change between two frames to call it a playing video. */
+        const val VIDEO_MOTION_MIN = 0.01
+
+        /** Minimum visible thumbnail height (px) to trust the motion test. */
+        const val MIN_IMAGE_PX = 120
+
+        /** Above this share of changed pixels in the (static) title row, the feed itself is moving. */
+        const val VIDEO_CONTROL_MAX = 0.005
         val DURATION = Regex("""\b\d{1,2}:\d{2}\b""")
         // 2026-11-21 dumps (25 cards): video cards expose NO badge / 'Reproducir' / extra node, and
         // the article page is an empty WebView, so the only signal left is the word in the title.
@@ -460,6 +482,56 @@ class BingReadToEarnRunner(
             primitives.idle(300, 450)
         }
         return false
+    }
+
+    /**
+     * Motion test for an auto-playing feed video. Compares the card's image area
+     * (≈ title.top-520 .. title.top-70, the thumbnail sits ~45 px above the title)
+     * between screenshots ~0.5 s apart, twice. Still images change 0.00 % of the
+     * sampled pixels; playing videos 6–96 % (2026-11-21 captures). The title row
+     * is a control: if it changes too, the feed is still scrolling and that pair
+     * is ignored.
+     *
+     * Returns true = playing video, false = static, null = can't tell (no screenshot
+     * support/capability, image area mostly under the sticky header, or still scrolling).
+     */
+    /** Pixels of the card's thumbnail area (title.top-520 .. title.top-70) not hidden under the sticky header. */
+    private suspend fun imageVisiblePx(card: FeedCard): Int {
+        val t = card.tapTarget
+        val (bandTop, _) = feedBand(snapshotVisible())
+        return (t.boundsT - 70) - maxOf(t.boundsT - 520, bandTop)
+    }
+
+    private suspend fun looksLikePlayingVideo(card: FeedCard): Boolean? {
+        val t = card.tapTarget
+        val (bandTop, _) = feedBand(snapshotVisible())
+        val imgTop = maxOf(t.boundsT - 520, bandTop)
+        val imgBot = t.boundsT - 70
+        if (imgBot - imgTop < MIN_IMAGE_PX) {
+            FarmerLog.d("  videoCheck: only ${imgBot - imgTop} px of the image area is visible — unknown")
+            return null
+        }
+        var prev = primitives.host.captureScreen() ?: run {
+            FarmerLog.w("  videoCheck: no screenshot (API < 30, capability missing or refused) — using title heuristic")
+            return null
+        }
+        // Two clean pairs (title row still) decide "static". A pair where the title row
+        // moved means the feed is still scrolling (run 7, card #9: 10.8 % / 5.4 %), so
+        // keep comparing — up to 4 pairs — instead of giving up with "unknown".
+        var stablePairs = 0
+        repeat(4) {
+            primitives.idle(500, 600)
+            val cur = primitives.host.captureScreen() ?: return null
+            val img = FrameMotion.changedFraction(prev, cur, 90, imgTop, 990, imgBot) ?: return null
+            val ctrl = FrameMotion.changedFraction(prev, cur, 60, t.boundsT, 1_020, t.boundsB) ?: 0.0
+            FarmerLog.d("  videoCheck: image changed ${"%.1f".format(img * 100)}%, title row ${"%.1f".format(ctrl * 100)}%")
+            if (ctrl <= VIDEO_CONTROL_MAX) {
+                if (img >= VIDEO_MOTION_MIN) return true
+                if (++stablePairs >= 2) return false
+            }
+            prev = cur
+        }
+        return if (stablePairs >= 1) false else null
     }
 
     /**

@@ -87,6 +87,13 @@ interface AutomationHost {
      */
     suspend fun snapshotTree(maxDepth: Int = 20): List<TreeNode>
 
+    /**
+     * Capture the screen as pixels, or null when unsupported (API < 30), the
+     * service lacks the screenshot capability, or the system refuses (calls
+     * closer than ~333 ms apart are rejected). Never throws.
+     */
+    suspend fun captureScreen(): PixelFrame?
+
     /** Screen width in pixels. */
     val screenWidth: Int
 

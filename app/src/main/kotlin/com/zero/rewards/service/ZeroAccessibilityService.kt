@@ -3,21 +3,31 @@ package com.zero.rewards.service
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
 import android.util.DisplayMetrics
+import android.view.Display
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.zero.rewards.core.automation.AutomationHost
 import com.zero.rewards.core.automation.AutomationNode
+import com.zero.rewards.core.automation.PixelFrame
 import com.zero.rewards.core.automation.TreeNode
 import com.zero.rewards.core.log.FarmerLog
+import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.resume
 
 /**
  * Accessibility service that implements [AutomationHost].
@@ -295,6 +305,71 @@ class ZeroAccessibilityService : AccessibilityService(), AutomationHost {
         return out
     }
 
+    private val screenshotExecutor: Executor by lazy { Executors.newSingleThreadExecutor() }
+
+    /**
+     * Screenshot downscaled by [CAPTURE_SCALE_DOWN] (a full-res IntArray is 10.6 MB;
+     * the 2026-11-21 run hit OutOfMemoryError on the 9th card). Motion detection only
+     * samples every 12th pixel, so every 4th is plenty.
+     *
+     * The continuation is held through an AtomicReference that is emptied on the first
+     * resume: otherwise the callback (kept alive by the system) keeps the continuation,
+     * and the continuation keeps the frame it was resumed with — that is what
+     * retained every capture.
+     */
+    override suspend fun captureScreen(): PixelFrame? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return suspendCancellableCoroutine { cont ->
+            val pending = AtomicReference<CancellableContinuation<PixelFrame?>?>(cont)
+            fun finish(frame: PixelFrame?) {
+                val c = pending.getAndSet(null) ?: return
+                if (c.isActive) c.resume(frame)
+            }
+            try {
+                takeScreenshot(
+                    Display.DEFAULT_DISPLAY,
+                    screenshotExecutor,
+                    object : TakeScreenshotCallback {
+                        override fun onSuccess(result: ScreenshotResult) {
+                            val buffer = result.hardwareBuffer
+                            try {
+                                val hw = Bitmap.wrapHardwareBuffer(buffer, result.colorSpace)
+                                val soft = hw?.copy(Bitmap.Config.ARGB_8888, false)
+                                hw?.recycle()
+                                if (soft == null) { finish(null); return }
+                                val small = Bitmap.createScaledBitmap(
+                                    soft,
+                                    (soft.width / CAPTURE_SCALE_DOWN).coerceAtLeast(1),
+                                    (soft.height / CAPTURE_SCALE_DOWN).coerceAtLeast(1),
+                                    false,
+                                )
+                                val px = IntArray(small.width * small.height)
+                                small.getPixels(px, 0, small.width, 0, 0, small.width, small.height)
+                                val frame = PixelFrame(small.width, small.height, px, CAPTURE_SCALE_DOWN)
+                                if (small !== soft) small.recycle()
+                                soft.recycle()
+                                finish(frame)
+                            } catch (t: Throwable) {
+                                FarmerLog.w("captureScreen: copy failed", t)
+                                finish(null)
+                            } finally {
+                                buffer.close()
+                            }
+                        }
+
+                        override fun onFailure(errorCode: Int) {
+                            FarmerLog.w("captureScreen: takeScreenshot failed, errorCode=$errorCode")
+                            finish(null)
+                        }
+                    },
+                )
+            } catch (t: Throwable) {
+                FarmerLog.w("captureScreen: takeScreenshot threw", t)
+                finish(null)
+            }
+        }
+    }
+
     // ----- helpers -----
 
     /** [cache] = false for read-only dumps: the handle can't be resolved back to a live node. */
@@ -368,6 +443,9 @@ class ZeroAccessibilityService : AccessibilityService(), AutomationHost {
     companion object {
         /** Upper bound on nodes returned by [snapshotTree] so a runaway tree can't stall the dump. */
         private const val SNAPSHOT_TREE_MAX_NODES = 3_000
+
+        /** Downscale factor of [captureScreen] frames. */
+        private const val CAPTURE_SCALE_DOWN = 4
         @Volatile private var instance: ZeroAccessibilityService? = null
         fun get(): ZeroAccessibilityService? = instance
     }

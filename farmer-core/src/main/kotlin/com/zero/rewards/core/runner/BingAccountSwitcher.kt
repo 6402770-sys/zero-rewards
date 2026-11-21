@@ -428,20 +428,40 @@ class BingAccountSwitcher(private val primitives: BingPrimitives) {
         // Only accept Perfil candidates in the TOP-LEFT header region
         // (y < 300 and x < screenWidth * 0.3) — that's the hamburger button.
         // The avatar inside AccountDetails sits lower and more centered.
-        val screenH = primitives.host.screenHeight
-        val screenW = primitives.host.screenWidth
-        val perfil = pickHeaderNode("Perfil", screenH, screenW)
-            ?: pickHeaderNode("Profile", screenH, screenW)
-            ?: pickHeaderNode("Cuenta", screenH, screenW)
-            ?: pickHeaderNode("Account", screenH, screenW)
-            ?: pickHeaderNode("Avatar", screenH, screenW)
-            ?: return false
+        var perfil = findPerfilButton()
+        if (perfil == null) {
+            // 2026-11-21 run: Bing came back with the feed left scrolled; the header
+            // collapses and 'Perfil' exists in the tree with visible=false, so this
+            // returned false and the switch was skipped. Scroll to the top: the
+            // Inicio tab does it, a few swipes up are the fallback.
+            FarmerLog.d("openPerfilDrawer: Perfil not visible (feed scrolled?) — Inicio tap + scroll up")
+            tapInicioOnce()
+            primitives.idle(700, 1_100)
+            perfil = findPerfilButton()
+            var swipes = 0
+            while (perfil == null && swipes < 3) {
+                primitives.scrollUp(0.7f); primitives.idle(500, 800)
+                perfil = findPerfilButton()
+                swipes++
+            }
+        }
+        if (perfil == null) return false
         // Real gesture: tapCoord on this node is what opened the profile page in
         // the 2026-11-21 dump (HANDOFF rule 1 — don't rely on ACTION_CLICK).
         FarmerLog.d("openPerfilDrawer: tapCoord ${perfil.describe()}")
         primitives.host.tapCoord(perfil.centerX.toFloat(), perfil.centerY.toFloat())
         primitives.idle(900, 1_400)
         return true
+    }
+
+    private suspend fun findPerfilButton(): AutomationNode? {
+        val screenH = primitives.host.screenHeight
+        val screenW = primitives.host.screenWidth
+        return pickHeaderNode("Perfil", screenH, screenW)
+            ?: pickHeaderNode("Profile", screenH, screenW)
+            ?: pickHeaderNode("Cuenta", screenH, screenW)
+            ?: pickHeaderNode("Account", screenH, screenW)
+            ?: pickHeaderNode("Avatar", screenH, screenW)
     }
 
     private suspend fun pickHeaderNode(desc: String, screenH: Int, screenW: Int): AutomationNode? {

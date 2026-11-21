@@ -5,6 +5,7 @@
     android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagRequestTouchExplorationMode"
     android:canPerformGestures="true"
     android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
     android:canRequestFilterKeyEvents="false"
     android:notificationTimeout="100"
     android:packageNames="com.microsoft.bing"
